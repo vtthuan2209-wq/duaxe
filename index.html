@@ -2,14 +2,20 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Webgame Đua Xe - Sprite & Âm thanh</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#111" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/assets/icon-192.png" />
+  <title>Webgame Đua Xe - Né chướng ngại vật</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="ui">
     <div id="title">Đua xe - Né chướng ngại vật</div>
     <div id="score">Điểm: 0</div>
+
     <div id="overlay" class="centered">
       <div id="startScreen">
         <h1>Đua xe</h1>
@@ -17,19 +23,24 @@
         <button id="startBtn">Bắt đầu</button>
         <div id="loading" style="margin-top:10px;color:#ddd;font-size:14px;"></div>
       </div>
+
       <div id="gameOverScreen" style="display:none">
         <h1>Thua rồi!</h1>
         <p id="finalScore">Điểm: 0</p>
         <button id="restartBtn">Chơi lại</button>
       </div>
     </div>
+
     <div id="controls-mobile">
       <button id="leftBtn">◀</button>
       <button id="rightBtn">▶</button>
     </div>
   </div>
 
-  <canvas id="gameCanvas"></canvas>
+  <!-- app-root helps CSS safe-area & 100vh handling on iOS -->
+  <div class="app-root">
+    <canvas id="gameCanvas" aria-label="Game canvas"></canvas>
+  </div>
 
   <script src="game.js"></script>
 </body>

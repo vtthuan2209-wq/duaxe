@@ -3,18 +3,34 @@
   --road:#2b3344;
   --accent:#ffd166;
   --text:#e6eef8;
+  --vh: 1vh; /* will be overwritten by JS */
 }
 
+/* Basic layout */
 *{box-sizing:border-box;font-family:Inter, system-ui, Arial, sans-serif}
-html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg),#11141a)}
+html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg),#11141a);}
+
+/* Use app-root height based on --vh (fixes 100vh on mobile) */
+.app-root{
+  height: calc(var(--vh) * 100);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding: 12px 16px;
+}
+
+/* Canvas */
 #gameCanvas{
   display:block;
-  margin: 12px auto 24px;
   background: linear-gradient(#2f3648,#22272f);
   border-radius:12px;
   box-shadow:0 8px 30px rgba(0,0,0,0.6);
   position: relative;
-  z-index: 1; /* ensure canvas is below UI */
+  z-index: 1;
+  max-width: 100%;
+  width: 100%;
+  height: auto; /* actual size managed by JS resize to maintain aspect */
+  touch-action: none; /* better pointer handling on mobile */
 }
 
 /* UI wrapper should be above canvas so buttons are clickable */
@@ -69,6 +85,7 @@ button{
   font-weight:700;cursor:pointer;
 }
 
+/* mobile on-screen controls */
 #controls-mobile{
   position:fixed;
   left:50%;
@@ -81,6 +98,14 @@ button{
 
 #controls-mobile button{
   width:72px;height:56px;border-radius:10px;font-size:22px;
+}
+
+/* safe area adjustments for notch devices */
+body {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 /* hide mobile controls on desktop (large screens) */

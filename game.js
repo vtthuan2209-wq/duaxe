@@ -1,0 +1,630 @@
+// game.js - Dynamic car and obstacle behaviors with particles and sprite-sheet support
+// Replace your existing game.js with this file.
+//
+// TUNING at top: thay đổi các hằng số để điều chỉnh "mức động" nhanh chóng.
+
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const overlay = document.getElementById('overlay');
+  const startScreen = document.getElementById('startScreen');
+  const gameOverScreen = document.getElementById('gameOverScreen');
+  const finalScore = document.getElementById('finalScore');
+  const startBtn = document.getElementById('startBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const leftBtn = document.getElementById('leftBtn');
+  const rightBtn = document.getElementById('rightBtn');
+  const loadingEl = document.getElementById('loading');
+
+  // ---------- ASSETS (optional) ----------
+  // Place images in assets/ if you want sprites.
+  // - assets/carSheet.png       (sprite sheet horizontal frames)
+  // - assets/obstacleSheet.png  (sprite sheet)
+  // - assets/exhaust.png        (optional particle image)
+  const ASSETS = {
+    images: {
+      carSheet: 'assets/carSheet.png',
+      obstacleSheet: 'assets/obstacleSheet.png',
+      exhaust: 'assets/exhaust.png'
+    },
+    audio: {
+      music: 'assets/background.mp3',
+      hit: 'assets/hit.wav'
+    }
+  };
+
+  // ---------- TUNING PARAMETERS ----------
+  const LANE_COUNT = 3;
+  const LANE_OBS_WIDTH_RATIO = 0.52; // narrower obstacle relative to lane
+  const LANE_SIDE_PADDING = 10;
+  const MIN_VERTICAL_GAP_BASE = 160;
+  const MIN_VERTICAL_GAP_SPEED_FACTOR = 9;
+  const SECOND_OBS_PROB = 0.14;
+  const AVOID_ADJACENT_SECOND = true;
+  const SPAWN_RETRY_BACKOFF = 220;
+  const MOVE_SPEED_BASE = 12; // lateral responsiveness
+  const CAR_TILT_MAX = 12; // degrees
+  const CAR_BOB_AMPLITUDE = 3; // px
+  const CAR_BOB_SPEED = 0.006; // bob speed multiplier
+  const SKID_THRESHOLD = 14; // if lateral speed > threshold create skid particles
+  const EXHAUST_RATE = 60; // ms per exhaust particle
+  const PARTICLE_LIFETIME = 600; // ms
+  const PARTICLE_MAX = 120;
+  const SPRITE_ANIM_FPS = 12; // fallback fps for sprite sheets
+  // ---------------------------------------
+
+  let width = 400, height = 700;
+  let dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  function resize() {
+    const maxWidth = Math.min(window.innerWidth - 32, 480);
+    const maxHeight = Math.min(window.innerHeight - 120, 800);
+    width = maxWidth; height = maxHeight;
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // game state
+  let running = false;
+  let score = 0;
+  let speed = 2.2;
+  let car = { w: 48, h: 40, x: 0, y: 0, vx: 0, tilt: 0, bobPhase: 0 };
+  let obstacles = []; // { lane, x, y, w, h, type, params }
+  let lastSpawn = 0;
+  let spawnInterval = 1000;
+  let lastTime = 0;
+  let keys = { left:false, right:false };
+  let touchSide = null;
+  const assetsLoaded = { images: {}, audio: {} };
+
+  // Particles
+  const particles = [];
+  let lastExhaustAt = 0;
+
+  // sprite metadata (filled if sheet loaded)
+  const spriteMeta = {
+    car: { img: null, frames: 1, frameW: 0, frameH: 0 },
+    obstacle: { img: null, frames: 1, frameW: 0, frameH: 0 },
+    exhaustImg: null
+  };
+
+  // Loaders
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Image failed: ' + src));
+      img.src = src;
+    });
+  }
+  function loadAudio(src) {
+    return new Promise((resolve, reject) => {
+      const audio = new Audio();
+      audio.oncanplaythrough = () => resolve(audio);
+      audio.onerror = () => reject(new Error('Audio failed: ' + src));
+      audio.src = src;
+      audio.load();
+    });
+  }
+
+  async function loadAssets() {
+    loadingEl.textContent = 'Đang tải tài nguyên...';
+
+    const imagePromises = Object.entries(ASSETS.images).map(([k, src]) =>
+      loadImage(src).then(img => ({ k, img })).catch(() => ({ k, img: null }))
+    );
+    const audioPromises = Object.entries(ASSETS.audio).map(([k, src]) =>
+      loadAudio(src).then(a => ({ k, a })).catch(() => ({ k, a: null }))
+    );
+
+    const images = await Promise.all(imagePromises);
+    images.forEach(({k, img}) => { assetsLoaded.images[k] = img; });
+
+    const audios = await Promise.all(audioPromises);
+    audios.forEach(({k, a}) => { assetsLoaded.audio[k] = a; });
+
+    // setup spriteMeta if sheets found
+    if (assetsLoaded.images.carSheet) {
+      spriteMeta.car.img = assetsLoaded.images.carSheet;
+      // assume horizontal frames, try detect frames by approximate height
+      spriteMeta.car.frameH = assetsLoaded.images.carSheet.height;
+      spriteMeta.car.frames = Math.max(1, Math.floor(assetsLoaded.images.carSheet.width / spriteMeta.car.frameH));
+      spriteMeta.car.frameW = Math.floor(assetsLoaded.images.carSheet.width / spriteMeta.car.frames);
+    }
+    if (assetsLoaded.images.obstacleSheet) {
+      spriteMeta.obstacle.img = assetsLoaded.images.obstacleSheet;
+      spriteMeta.obstacle.frameH = assetsLoaded.images.obstacleSheet.height;
+      spriteMeta.obstacle.frames = Math.max(1, Math.floor(assetsLoaded.images.obstacleSheet.width / spriteMeta.obstacle.frameH));
+      spriteMeta.obstacle.frameW = Math.floor(assetsLoaded.images.obstacleSheet.width / spriteMeta.obstacle.frames);
+    }
+    if (assetsLoaded.images.exhaust) spriteMeta.exhaustImg = assetsLoaded.images.exhaust;
+
+    // audio settings
+    if (assetsLoaded.audio.music) {
+      assetsLoaded.audio.music.loop = true;
+      assetsLoaded.audio.music.volume = 0.35;
+    }
+    if (assetsLoaded.audio.hit) assetsLoaded.audio.hit.volume = 0.9;
+
+    const imgNames = Object.keys(assetsLoaded.images).filter(k => assetsLoaded.images[k]);
+    const audNames = Object.keys(assetsLoaded.audio).filter(k => assetsLoaded.audio[k]);
+    loadingEl.textContent = `Ảnh: ${imgNames.length}/${Object.keys(ASSETS.images).length}, Âm thanh: ${audNames.length}/${Object.keys(ASSETS.audio).length}`;
+    setTimeout(() => { loadingEl.textContent = ''; }, 900);
+  }
+
+  function reset() {
+    obstacles = [];
+    particles.length = 0;
+    score = 0;
+    speed = 2.2;
+    lastSpawn = 0;
+    spawnInterval = 1000;
+    car.w = Math.min(64, width * 0.12);
+    car.h = Math.min(100, height * 0.16) * 0.5; // keep 50% shorter as requested earlier
+    car.x = (width - car.w) / 2;
+    car.y = height - car.h - 28;
+    car.vx = 0;
+    car.tilt = 0;
+    car.bobPhase = 0;
+    lastExhaustAt = 0;
+  }
+
+  // Shuffle helper
+  function shuffle(arr) {
+    for (let i = arr.length-1; i>0; i--) {
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  // Lane geometry
+  function laneInfo() {
+    const roadW = width * 0.7;
+    const roadLeft = (width - roadW) / 2;
+    const laneWidth = roadW / LANE_COUNT;
+    const centers = [];
+    for (let i=0;i<LANE_COUNT;i++) centers.push(roadLeft + i*laneWidth + laneWidth/2);
+    return { roadW, roadLeft, laneWidth, centers };
+  }
+
+  // Create obstacle with type and movement params
+  // types: 'static', 'sine', 'patrol'
+  function createObstacleInLane(lane, w, h) {
+    const { roadLeft, laneWidth } = laneInfo();
+    // ensure obstacle sits inside lane
+    const obsW = Math.min(w, Math.max(12, laneWidth - LANE_SIDE_PADDING*2));
+    const x = roadLeft + lane*laneWidth + (laneWidth - obsW)/2;
+    const spawnY = -h - 8;
+    // pick type probabilistically
+    const r = Math.random();
+    let type = 'static';
+    let params = {};
+    if (r < 0.18) {
+      type = 'sine';
+      params = {
+        amplitude: Math.min( laneWidth*0.28, 24 + Math.random()*28 ),
+        phase: Math.random()*Math.PI*2,
+        freq: 0.0015 + Math.random()*0.0025, // px/ms factor
+      };
+    } else if (r < 0.34) {
+      type = 'patrol';
+      const { centers } = laneInfo();
+      // choose a target lane (differs) within bounds
+      const otherLane = Math.max(0, Math.min(LANE_COUNT-1, lane + (Math.random()<0.5? -1:1)));
+      const x2base = roadLeft + otherLane*laneWidth + (laneWidth - obsW)/2;
+      params = {
+        x1: x,
+        x2: x2base,
+        speed: 0.03 + Math.random()*0.06 // px per ms
+      };
+    } else {
+      type = 'static';
+      params = {};
+    }
+    return { lane, x, y: spawnY, w: obsW, h, type, params, passed:false, anim: { t: 0 } };
+  }
+
+  // spawn logic with safety checks
+  function spawnObstacle() {
+    const { roadLeft, laneWidth } = laneInfo();
+    const spawnY = -10;
+    const h = 28 + Math.random()*48;
+    const baseW = laneWidth * (0.46 + Math.random()*0.12);
+    // compute min vertical gap
+    const minVerticalGap = Math.max(Math.floor(car.h * 1.2), MIN_VERTICAL_GAP_BASE) + Math.min(200, Math.floor(speed * MIN_VERTICAL_GAP_SPEED_FACTOR));
+    const lanes = shuffle([...Array(LANE_COUNT).keys()]);
+    const safeLanes = [];
+    for (const lane of lanes) {
+      let nearest = Infinity;
+      for (const ob of obstacles) {
+        if (ob.lane === lane) {
+          const dist = ob.y - spawnY;
+          if (dist < nearest) nearest = dist;
+        }
+      }
+      if (nearest === Infinity || nearest >= minVerticalGap) safeLanes.push(lane);
+    }
+    if (safeLanes.length === 0) {
+      return false;
+    }
+
+    const lane1 = safeLanes[Math.floor(Math.random()*safeLanes.length)];
+    obstacles.push(createObstacleInLane(lane1, baseW, h));
+
+    // maybe spawn second but avoid blocking
+    if (Math.random() < SECOND_OBS_PROB && safeLanes.length > 1) {
+      const others = safeLanes.filter(l => l !== lane1);
+      shuffle(others);
+      for (const cand of others) {
+        if (AVOID_ADJACENT_SECOND && Math.abs(cand - lane1) === 1) {
+          // simple check: if there's already obstacle in the remaining lane near spawnY, skip
+          const wouldBlock = obstacles.some(ob => ob.lane !== lane1 && ob.lane !== cand && Math.abs(ob.y - spawnY) < minVerticalGap*0.9);
+          if (wouldBlock) continue;
+        }
+        obstacles.push(createObstacleInLane(cand, baseW, h));
+        break;
+      }
+    }
+    return true;
+  }
+
+  // PARTICLES
+  function spawnParticle(x,y,vx,vy,size,life,color) {
+    if (particles.length > PARTICLE_MAX) return;
+    particles.push({
+      x, y, vx, vy, size, life, birth: performance.now(), color, alpha:1
+    });
+  }
+  function updateParticles(dt) {
+    const now = performance.now();
+    for (let i = particles.length-1; i>=0; i--) {
+      const p = particles[i];
+      p.vy += 0.0006 * dt; // gravity small
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      const t = now - p.birth;
+      p.alpha = Math.max(0, 1 - t / p.life);
+      if (t > p.life) particles.splice(i,1);
+    }
+  }
+  function drawParticles() {
+    for (const p of particles) {
+      ctx.globalAlpha = p.alpha * 0.9;
+      if (spriteMeta.exhaustImg) {
+        // draw small image if available
+        const s = Math.max(6, p.size);
+        ctx.drawImage(spriteMeta.exhaustImg, p.x - s/2, p.y - s/2, s, s);
+      } else {
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(1, p.size/2), 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // rectangle intersection
+  function rectsIntersect(a,b) {
+    return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+  }
+
+  // DRAW HELPERS
+  function drawShadow(x,y,w) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(x + w/2, y, w*0.52, 8, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // draw car: uses sprite sheet if available otherwise vector
+  function drawCarFrame(ts) {
+    // bobbing effect
+    car.bobPhase += CAR_BOB_SPEED * (ts - (car._lastBobTs || ts));
+    car._lastBobTs = ts;
+    const bob = Math.sin(car.bobPhase) * CAR_BOB_AMPLITUDE;
+
+    // tilt smoothing
+    car.tilt += (car._targetTilt || 0) - car.tilt;
+    const tiltRad = (car.tilt * Math.PI) / 180;
+
+    // shadow
+    drawShadow(car.x, car.y + car.h + 6, car.w);
+
+    ctx.save();
+    ctx.translate(car.x + car.w/2, car.y + car.h/2 + bob);
+    ctx.rotate(tiltRad);
+    // draw sprite or vector
+    if (spriteMeta.car.img && spriteMeta.car.frames > 0) {
+      // animate based on time
+      const frameIndex = Math.floor((ts / (1000 / SPRITE_ANIM_FPS)) % spriteMeta.car.frames);
+      const sx = frameIndex * spriteMeta.car.frameW;
+      ctx.drawImage(spriteMeta.car.img, sx, 0, spriteMeta.car.frameW, spriteMeta.car.frameH,
+        -car.w/2, -car.h/2, car.w, car.h);
+    } else {
+      // vector car
+      ctx.fillStyle = '#ff4d6d';
+      roundRect(ctx, -car.w/2, -car.h/2, car.w, car.h, 8);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff66';
+      ctx.fillRect(-car.w*0.18, -car.h*0.24, car.w*0.36, car.h*0.22);
+      // wheels
+      ctx.fillStyle = '#111';
+      const rw = car.w*0.16, rh = car.h*0.18;
+      ctx.fillRect(-car.w/2 - 2, -car.h/4, rw, rh);
+      ctx.fillRect(car.w/2 - rw + 2, -car.h/4, rw, rh);
+      ctx.fillRect(-car.w/2 - 2, car.h/8, rw, rh);
+      ctx.fillRect(car.w/2 - rw + 2, car.h/8, rw, rh);
+    }
+    ctx.restore();
+  }
+
+  function drawObstacle(ob, ts) {
+    // compute x offset depending on type
+    if (ob.type === 'sine') {
+      const amp = ob.params.amplitude;
+      const dx = Math.sin((ts * ob.params.freq) + ob.params.phase) * amp;
+      ob.xRender = ob.x + dx;
+    } else if (ob.type === 'patrol') {
+      // move between x1 and x2
+      if (!ob.params.dir) ob.params.dir = 1;
+      ob.params.t = (ob.params.t || 0) + ob.params.speed * (ts - (ob._lastTS || ts));
+      // ping-pong position
+      const span = ob.params.x2 - ob.params.x1;
+      const prog = (Math.sin(ob.params.t) + 1) / 2; // 0..1
+      ob.xRender = ob.params.x1 + span * prog;
+    } else {
+      ob.xRender = ob.x;
+    }
+
+    // small pulse highlight if close to player
+    const distToCar = ob.y - car.y;
+    const pulse = Math.max(0, Math.min(1, 1 - (distToCar / 220)));
+    const glow = 0.06 + pulse * 0.14;
+
+    // draw shadow for obstacle
+    drawShadow(ob.xRender, ob.y + ob.h + 6, ob.w);
+
+    if (spriteMeta.obstacle.img && spriteMeta.obstacle.frames > 0) {
+      const frameIndex = Math.floor((ts / (1000 / SPRITE_ANIM_FPS)) % spriteMeta.obstacle.frames);
+      const sx = frameIndex * spriteMeta.obstacle.frameW;
+      ctx.globalAlpha = 1 - glow * 0.7;
+      ctx.drawImage(spriteMeta.obstacle.img, sx, 0, spriteMeta.obstacle.frameW, spriteMeta.obstacle.frameH,
+        ob.xRender, ob.y, ob.w, ob.h);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.save();
+      ctx.fillStyle = '#6c757d';
+      roundRect(ctx, ob.xRender, ob.y, ob.w, ob.h, 6);
+      ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${0.06 + pulse*0.14})`;
+      ctx.fillRect(ob.xRender + ob.w*0.12, ob.y + ob.h*0.25, ob.w*0.76, Math.max(3, ob.h*0.18));
+      ctx.restore();
+    }
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // update game state
+  function update(dt, ts) {
+    // speed increases slightly
+    speed += dt * 0.00005;
+    spawnInterval = Math.max(520, 1100 - score * 4 - Math.floor(speed * 18));
+
+    // spawn logic with backoff
+    lastSpawn += dt;
+    if (lastSpawn > spawnInterval) {
+      const spawned = spawnObstacle();
+      if (spawned) lastSpawn = 0;
+      else lastSpawn = spawnInterval - SPAWN_RETRY_BACKOFF;
+    }
+
+    // input & lateral movement smoothing
+    const moveSpeed = MOVE_SPEED_BASE + Math.round(speed * 2.2);
+    const targetVx = (keys.left || touchSide === 'left' ? -moveSpeed : 0) + (keys.right || touchSide === 'right' ? moveSpeed : 0);
+    // smooth vx (simple lerp)
+    car.vx += (targetVx - car.vx) * 0.22;
+    car.x += car.vx;
+
+    // tilt target based on vx
+    car._targetTilt = (-car.vx / (MOVE_SPEED_BASE + 8)) * CAR_TILT_MAX;
+
+    // exhaust particles (periodic)
+    if (ts - lastExhaustAt > EXHAUST_RATE) {
+      const exX = car.x + car.w/2 + (Math.random()-0.5)*6;
+      const exY = car.y + car.h + 6;
+      spawnParticle(exX, exY, (Math.random()-0.5)*0.03, 0.02, 6 + Math.random()*6, PARTICLE_LIFETIME, 'rgba(120,120,120,0.9)');
+      lastExhaustAt = ts;
+    }
+
+    // skid detection: if vx changed rapidly recently produce skids
+    if (Math.abs(car.vx) > SKID_THRESHOLD) {
+      const skX = car.x + (car.vx > 0 ? 6 : car.w - 6);
+      const skY = car.y + car.h - 6;
+      if (Math.random() < 0.22) {
+        spawnParticle(skX, skY, (Math.random()-0.5)*0.12, -0.02, 4 + Math.random()*4, 420 + Math.random()*240, 'rgba(60,60,60,0.85)');
+      }
+    }
+
+    // confine to road
+    const { roadLeft, laneWidth } = laneInfo();
+    const roadRight = roadLeft + laneWidth * LANE_COUNT;
+    if (car.x < roadLeft + 6) { car.x = roadLeft + 6; car.vx = 0; }
+    if (car.x + car.w > roadRight - 6) { car.x = roadRight - 6 - car.w; car.vx = 0; }
+
+    // update obstacles positions & remove offscreen
+    for (let i = obstacles.length-1; i>=0; i--) {
+      const ob = obstacles[i];
+      // move vertical
+      ob.y += speed * (1 + dt * 0.0015);
+      // for patrol type update internal time
+      if (ob.type === 'patrol') {
+        ob.params.t = (ob.params.t || 0) + ob.params.speed * dt;
+      }
+      if (!ob.passed && ob.y > car.y + car.h) { ob.passed = true; score += 10; }
+      if (ob.y > height + 240) obstacles.splice(i,1);
+    }
+
+    // update particles
+    updateParticles(dt);
+
+    // collision detection (AABB using rendered x for obstacles)
+    for (const ob of obstacles) {
+      // compute ob.xRender for collision if needed (approx using type)
+      let obX = ob.x;
+      if (ob.type === 'sine') {
+        const amp = ob.params.amplitude;
+        obX = ob.x + Math.sin((ts * ob.params.freq) + ob.params.phase) * amp;
+      } else if (ob.type === 'patrol') {
+        const span = ob.params.x2 - ob.params.x1;
+        const prog = (Math.sin(ob.params.t || 0) + 1) / 2;
+        obX = ob.params.x1 + span * prog;
+      }
+      const obRect = { x: obX, y: ob.y, w: ob.w, h: ob.h };
+      if (rectsIntersect(car, obRect)) {
+        // collision!
+        running = false;
+        // explosion particles
+        for (let p = 0; p < 28; p++) {
+          const ang = Math.random() * Math.PI*2;
+          const mag = 0.06 + Math.random()*0.28;
+          spawnParticle(car.x + car.w/2, car.y + car.h/2, Math.cos(ang)*mag, Math.sin(ang)*mag, 6 + Math.random()*6, 600 + Math.random()*600, 'rgba(220,80,80,0.95)');
+        }
+        // play hit audio
+        if (assetsLoaded.audio && assetsLoaded.audio.hit) {
+          try { assetsLoaded.audio.hit.currentTime = 0; assetsLoaded.audio.hit.play(); } catch(e){}
+        }
+        if (assetsLoaded.audio && assetsLoaded.audio.music) {
+          try { assetsLoaded.audio.music.pause(); } catch(e){}
+        }
+        gameOver();
+        break;
+      }
+    }
+  }
+
+  // render
+  function render(ts) {
+    ctx.clearRect(0,0,width,height);
+    // background road
+    drawRoad();
+    // draw obstacles (compute animation positions)
+    for (const ob of obstacles) drawObstacle(ob, ts);
+    // draw particles behind car for depth
+    drawParticles();
+    // draw car on top
+    drawCarFrame(ts);
+    // optionally draw small HUD overlays (score handled by DOM)
+  }
+
+  function loop(ts) {
+    if (!lastTime) lastTime = ts;
+    const dt = ts - lastTime;
+    lastTime = ts;
+    if (running) {
+      update(dt, ts);
+      render(ts);
+      scoreEl.textContent = 'Điểm: ' + score;
+      requestAnimationFrame(loop);
+    } else {
+      // still render particles/scene once after stop
+      render(ts);
+    }
+  }
+
+  function drawRoad() {
+    const roadW = width * 0.7;
+    const roadLeft = (width - roadW) / 2;
+    ctx.fillStyle = '#222831';
+    ctx.fillRect(roadLeft, 0, roadW, height);
+    ctx.fillStyle = '#111418';
+    ctx.fillRect(roadLeft - 10, 0, 10, height);
+    ctx.fillRect(roadLeft + roadW, 0, 10, height);
+    ctx.strokeStyle = '#ffffff22';
+    ctx.lineWidth = 6;
+    ctx.setLineDash([30,20]);
+    ctx.beginPath();
+    ctx.moveTo(width/2, 0);
+    ctx.lineTo(width/2, height);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function gameOver() {
+    finalScore.textContent = 'Điểm: ' + score;
+    startScreen.style.display = 'none';
+    gameOverScreen.style.display = '';
+    overlay.style.display = 'flex';
+    scoreEl.textContent = 'Điểm: ' + score;
+  }
+
+  async function startGame() {
+    try { if (assetsLoaded.audio && assetsLoaded.audio.music) await assetsLoaded.audio.music.play(); } catch(e){}
+    reset();
+    running = true;
+    overlay.style.display = 'none';
+    startScreen.style.display = 'none';
+    gameOverScreen.style.display = 'none';
+    lastTime = 0;
+    requestAnimationFrame(loop);
+  }
+
+  // Input handlers
+  window.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = true;
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = false;
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    touchSide = (x < rect.width/2) ? 'left' : 'right';
+  });
+  window.addEventListener('pointerup', () => touchSide = null);
+  leftBtn.addEventListener('pointerdown', () => touchSide = 'left');
+  rightBtn.addEventListener('pointerdown', () => touchSide = 'right');
+  leftBtn.addEventListener('pointerup', () => touchSide = null);
+  rightBtn.addEventListener('pointerup', () => touchSide = null);
+  leftBtn.addEventListener('pointerleave', () => touchSide = null);
+  rightBtn.addEventListener('pointerleave', () => touchSide = null);
+
+  // attach UI handlers
+  if (startBtn) {
+    startBtn.addEventListener('click', async () => {
+      await loadAssets();
+      await startGame();
+    });
+  }
+  if (restartBtn) {
+    restartBtn.addEventListener('click', () => startGame());
+  }
+
+  // initial UI
+  overlay.style.display = 'flex';
+  startScreen.style.display = '';
+  gameOverScreen.style.display = 'none';
+  scoreEl.textContent = 'Điểm: 0';
+  resize();
+})();

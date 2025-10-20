@@ -1,0 +1,89 @@
+:root{
+  --bg:#1b1f2b;
+  --road:#2b3344;
+  --accent:#ffd166;
+  --text:#e6eef8;
+}
+
+*{box-sizing:border-box;font-family:Inter, system-ui, Arial, sans-serif}
+html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg),#11141a)}
+#gameCanvas{
+  display:block;
+  margin: 12px auto 24px;
+  background: linear-gradient(#2f3648,#22272f);
+  border-radius:12px;
+  box-shadow:0 8px 30px rgba(0,0,0,0.6);
+  position: relative;
+  z-index: 1; /* ensure canvas is below UI */
+}
+
+/* UI wrapper should be above canvas so buttons are clickable */
+#ui{
+  position:fixed;
+  left:0;right:0;top:0;
+  pointer-events:none;
+  z-index: 9999;
+}
+
+#ui .centered, #controls-mobile, #startBtn, #restartBtn {
+  pointer-events: auto; /* allow interactions on controls */
+}
+
+#title{
+  color:var(--text);
+  padding:12px 16px;
+  font-weight:600;
+  text-align:left;
+  pointer-events:auto;
+}
+
+#score{
+  position:fixed;
+  top:56px;
+  right:18px;
+  color:var(--text);
+  font-weight:700;
+  background:rgba(0,0,0,0.2);
+  padding:8px 12px;border-radius:8px;
+  pointer-events:auto;
+}
+
+#overlay{
+  position:fixed;
+  left:0;right:0;top:0;bottom:0;
+  display:flex;align-items:center;justify-content:center;
+  pointer-events:none;
+}
+
+.centered{
+  pointer-events:auto;
+  background:rgba(5,10,18,0.6);
+  padding:18px;border-radius:12px;color:var(--text);
+  text-align:center;
+  min-width:260px;
+}
+
+button{
+  background:var(--accent);
+  border:none;padding:10px 16px;border-radius:8px;
+  font-weight:700;cursor:pointer;
+}
+
+#controls-mobile{
+  position:fixed;
+  left:50%;
+  transform:translateX(-50%);
+  bottom:18px;
+  display:flex;
+  gap:12px;
+  pointer-events:auto;
+}
+
+#controls-mobile button{
+  width:72px;height:56px;border-radius:10px;font-size:22px;
+}
+
+/* hide mobile controls on desktop (large screens) */
+@media(min-width:700px){
+  #controls-mobile{display:none}
+}

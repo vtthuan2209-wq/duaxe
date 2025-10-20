@@ -1,12 +1,7 @@
-// game.js - Complete game with fullscreen / iOS --vh handling integrated
-// Replace your existing game.js with this file.
-//
-// This file includes:
-// - updateVhVar() to set CSS --vh for correct mobile viewport handling
-// - tryEnterFullScreen() to attempt Fullscreen API (and fallback scroll hack on iOS)
-// - integrated startBtn handler calling tryEnterFullScreen() before loading assets / starting game
-// - the dynamic game logic (car, obstacles, particles) from prior version
-
+// game.js - Car dodger with touch-follow control (drag to move)
+// Change: car is moved up by CAR_VERTICAL_OFFSET (60px) in reset()
+// Replace your existing game.js with this file (this is the previous dynamic version
+// with touch-follow support added and the vertical offset change).
 (() => {
   const canvas = document.getElementById('gameCanvas');
   const ctx = canvas.getContext('2d');
@@ -21,20 +16,12 @@
   const rightBtn = document.getElementById('rightBtn');
   const loadingEl = document.getElementById('loading');
 
-  // ---------- ASSETS (optional) ----------
-  const ASSETS = {
-    images: {
-      carSheet: 'assets/carSheet.png',
-      obstacleSheet: 'assets/obstacleSheet.png',
-      exhaust: 'assets/exhaust.png'
-    },
-    audio: {
-      music: 'assets/background.mp3',
-      hit: 'assets/hit.wav'
-    }
-  };
+  // ---------- CONFIG ----------
+  const TOUCH_FOLLOW_ENABLED = true; // true = follow finger x-position; false = older left/right touch
+  // Vertical offset to move the car upward (px)
+  const CAR_VERTICAL_OFFSET = 60; // <-- moved car up by 60px
 
-  // ---------- TUNING PARAMETERS ----------
+  // other tuning constants kept from previous version
   const LANE_COUNT = 3;
   const LANE_OBS_WIDTH_RATIO = 0.52;
   const LANE_SIDE_PADDING = 10;
@@ -52,80 +39,65 @@
   const PARTICLE_LIFETIME = 600;
   const PARTICLE_MAX = 120;
   const SPRITE_ANIM_FPS = 12;
-  // ---------------------------------------
+  // ----------------------------
+
+  // assets (optional)
+  const ASSETS = {
+    images: {
+      carSheet: 'assets/carSheet.png',
+      obstacleSheet: 'assets/obstacleSheet.png',
+      exhaust: 'assets/exhaust.png'
+    },
+    audio: {
+      music: 'assets/background.mp3',
+      hit: 'assets/hit.wav'
+    }
+  };
 
   let width = 400, height = 700;
   let dpr = Math.max(1, window.devicePixelRatio || 1);
 
-  // update --vh CSS custom property (fix mobile 100vh issues)
-  function updateVhVar() {
-    const vh = window.innerHeight * 0.01;
-    document.documentElement.style.setProperty('--vh', `${vh}px`);
-  }
-  window.addEventListener('resize', () => {
-    updateVhVar();
-    resize();
-  });
-  // initial
-  updateVhVar();
-
+  // update --vh if present (index.html already installed updateVhVar)
   function resize() {
-    // keep aspect bounded and let JS compute canvas pixel size
     const maxWidth = Math.min(window.innerWidth - 32, 480);
     const maxHeight = Math.min(window.innerHeight - 120, 800);
     width = maxWidth;
     height = maxHeight;
-    // style width/height (CSS handles container), but set actual canvas pixel size
     canvas.style.width = width + 'px';
     canvas.style.height = height + 'px';
     canvas.width = Math.floor(width * dpr);
     canvas.height = Math.floor(height * dpr);
     ctx.setTransform(dpr,0,0,dpr,0,0);
   }
+  window.addEventListener('resize', resize);
   resize();
 
-  // Fullscreen request + iOS fallback
-  async function tryEnterFullScreen() {
-    // Some browsers require a user gesture (we are inside click handler)
-    try {
-      const el = document.documentElement;
-      if (el.requestFullscreen) {
-        await el.requestFullscreen();
-        return true;
-      } else if (el.webkitRequestFullscreen) {
-        // iOS older webkit prefix
-        await el.webkitRequestFullscreen();
-        return true;
-      }
-    } catch (e) {
-      // ignore errors
-    }
-
-    // Fallback: small scroll to hide mobile address bar (works on many iOS Safari)
-    try {
-      window.scrollTo(0, 1);
-      setTimeout(() => window.scrollTo(0, 1), 350);
-    } catch (e) {}
-    return false;
-  }
-
-  // Game state & assets
+  // game state & assets
   let running = false;
   let score = 0;
   let speed = 2.2;
-  let car = { w: 48, h: 40, x: 0, y: 0, vx: 0, tilt: 0, bobPhase: 0 };
+  let car = { w: 48, h: 40, x: 0, y: 0, vx: 0, tilt: 0, bobPhase: 0, _lastBobTs: 0 };
   let obstacles = [];
   let lastSpawn = 0;
   let spawnInterval = 1000;
   let lastTime = 0;
   let keys = { left:false, right:false };
+  // Legacy touchSide (left/right half screen) kept for fallback
   let touchSide = null;
+
+  // Touch-follow specific
+  let touchFollowActive = false;
+  let touchPointerId = null;
+  let touchClientX = 0;
+  let touchTargetX = null; // desired car.x (left) such that car centered under finger
+  let allowPointerMove = true; // flag used for pointermove
+
   const assetsLoaded = { images: {}, audio: {} };
   const spriteMeta = { car: { img: null, frames: 1, frameW: 0, frameH: 0 }, obstacle: { img: null, frames: 1, frameW: 0, frameH: 0 }, exhaustImg: null };
   const particles = [];
   let lastExhaustAt = 0;
 
-  // Loaders
+  // simple loaders
   function loadImage(src) {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -146,7 +118,6 @@
 
   async function loadAssets() {
     loadingEl.textContent = 'Đang tải tài nguyên...';
-
     const imagePromises = Object.entries(ASSETS.images).map(([k, src]) =>
       loadImage(src).then(img => ({ k, img })).catch(() => ({ k, img: null }))
     );
@@ -194,20 +165,39 @@
     lastSpawn = 0;
     spawnInterval = 1000;
     car.w = Math.min(64, width * 0.12);
-    car.h = Math.min(100, height * 0.16) * 0.5; // 50% shorter height
+    car.h = Math.min(100, height * 0.16) * 0.5; // 50% shorter height as requested earlier
+    // Move car up by CAR_VERTICAL_OFFSET so it's higher on screen
     car.x = (width - car.w) / 2;
-    car.y = height - car.h - 28;
+    car.y = height - car.h - 28 - CAR_VERTICAL_OFFSET;
     car.vx = 0;
     car.tilt = 0;
     car.bobPhase = 0;
     lastExhaustAt = 0;
+    // clear touch follow
+    touchFollowActive = false;
+    touchPointerId = null;
+    touchClientX = 0;
+    touchTargetX = null;
   }
 
   // helpers
-  function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
-  function laneInfo() { const roadW = width * 0.7; const roadLeft = (width - roadW) / 2; const laneWidth = roadW / LANE_COUNT; const centers = []; for (let i=0;i<LANE_COUNT;i++) centers.push(roadLeft + i*laneWidth + laneWidth/2); return { roadW, roadLeft, laneWidth, centers }; }
+  function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+  function laneInfo() {
+    const roadW = width * 0.7;
+    const roadLeft = (width - roadW) / 2;
+    const laneWidth = roadW / LANE_COUNT;
+    const centers = [];
+    for (let i=0;i<LANE_COUNT;i++) centers.push(roadLeft + i*laneWidth + laneWidth/2);
+    return { roadW, roadLeft, laneWidth, centers };
+  }
 
-  // obstacle creation
+  // obstacle creation & spawn logic (kept same as previous)
   function createObstacleInLane(lane, w, h) {
     const { roadLeft, laneWidth } = laneInfo();
     const obsW = Math.min(w, Math.max(12, laneWidth - LANE_SIDE_PADDING*2));
@@ -399,12 +389,40 @@
       else lastSpawn = spawnInterval - SPAWN_RETRY_BACKOFF;
     }
 
+    // MOVE: integrate keyboard, touch-follow and legacy touchSide
     const moveSpeed = MOVE_SPEED_BASE + Math.round(speed * 2.2);
-    const targetVx = (keys.left || touchSide === 'left' ? -moveSpeed : 0) + (keys.right || touchSide === 'right' ? moveSpeed : 0);
+
+    // compute targetVx from inputs:
+    let targetVx = 0;
+
+    // Keyboard left/right or on-screen buttons produce ±moveSpeed
+    if (keys.left) targetVx -= moveSpeed;
+    if (keys.right) targetVx += moveSpeed;
+
+    // Legacy half-screen touch (fallback)
+    if (!TOUCH_FOLLOW_ENABLED && touchSide === 'left') targetVx -= moveSpeed;
+    if (!TOUCH_FOLLOW_ENABLED && touchSide === 'right') targetVx += moveSpeed;
+
+    // Touch-follow: convert targetX (desired car.x) into a velocity
+    if (TOUCH_FOLLOW_ENABLED && touchFollowActive && (touchTargetX !== null)) {
+      // error margin (px) to stop jittering
+      const dx = touchTargetX - car.x;
+      // proportional controller to move toward target smoothly
+      const k = 0.18; // responsiveness factor (increase to make following snappier)
+      const derivedVx = dx * k;
+      // clamp derivedVx to reasonable bounds
+      const maxDerived = moveSpeed * 1.6;
+      targetVx = Math.max(-maxDerived, Math.min(maxDerived, derivedVx));
+    }
+
+    // Smooth car.vx towards targetVx
     car.vx += (targetVx - car.vx) * 0.22;
     car.x += car.vx;
+
+    // tilt target based on vx
     car._targetTilt = (-car.vx / (MOVE_SPEED_BASE + 8)) * CAR_TILT_MAX;
 
+    // exhaust particles
     if (ts - lastExhaustAt > EXHAUST_RATE) {
       const exX = car.x + car.w/2 + (Math.random()-0.5)*6;
       const exY = car.y + car.h + 6;
@@ -412,6 +430,7 @@
       lastExhaustAt = ts;
     }
 
+  // skid particles
     if (Math.abs(car.vx) > SKID_THRESHOLD) {
       const skX = car.x + (car.vx > 0 ? 6 : car.w - 6);
       const skY = car.y + car.h - 6;
@@ -420,11 +439,13 @@
       }
     }
 
+    // confine to road
     const { roadLeft, laneWidth } = laneInfo();
     const roadRight = roadLeft + laneWidth * LANE_COUNT;
     if (car.x < roadLeft + 6) { car.x = roadLeft + 6; car.vx = 0; }
     if (car.x + car.w > roadRight - 6) { car.x = roadRight - 6 - car.w; car.vx = 0; }
 
+    // update obstacles
     for (let i = obstacles.length-1; i>=0; i--) {
       const ob = obstacles[i];
       ob.y += speed * (1 + dt * 0.0015);
@@ -435,8 +456,10 @@
       if (ob.y > height + 240) obstacles.splice(i,1);
     }
 
+    // update particles
     updateParticles(dt);
 
+    // collision detection using ob.xRender approximation
     for (const ob of obstacles) {
       let obX = ob.x;
       if (ob.type === 'sine') {
@@ -489,6 +512,7 @@
     }
   }
 
+  // DRAW helpers (unchanged)
   function drawRoad() {
     const roadW = width * 0.7;
     const roadLeft = (width - roadW) / 2;
@@ -526,7 +550,7 @@
     requestAnimationFrame(loop);
   }
 
-  // Input handlers
+  // INPUT: keyboard (unchanged)
   window.addEventListener('keydown', e => {
     if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = true;
     if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = true;
@@ -535,36 +559,121 @@
     if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = false;
     if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = false;
   });
-  canvas.addEventListener('pointerdown', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    touchSide = (x < rect.width/2) ? 'left' : 'right';
-  });
-  window.addEventListener('pointerup', () => touchSide = null);
-  leftBtn.addEventListener('pointerdown', () => touchSide = 'left');
-  rightBtn.addEventListener('pointerdown', () => touchSide = 'right');
-  leftBtn.addEventListener('pointerup', () => touchSide = null);
-  rightBtn.addEventListener('pointerup', () => touchSide = null);
-  leftBtn.addEventListener('pointerleave', () => touchSide = null);
-  rightBtn.addEventListener('pointerleave', () => touchSide = null);
 
-  // Attach start/restart handlers:
+  // POINTER / TOUCH: enhanced handling
+  // pointerdown: support both touch-follow and legacy half-screen touch
+  canvas.addEventListener('pointerdown', (e) => {
+    // if multiple pointers, only track the first for follow mode
+    if (TOUCH_FOLLOW_ENABLED) {
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      touchFollowActive = true;
+      touchPointerId = e.pointerId;
+      touchClientX = e.clientX;
+      // compute targetX so car centers under finger
+      const rect = canvas.getBoundingClientRect();
+      const localX = touchClientX - rect.left;
+      touchTargetX = localX - car.w/2;
+      // clamp to road bounds
+      const { roadLeft, laneWidth } = laneInfo();
+      const roadRight = roadLeft + laneWidth * LANE_COUNT;
+      const minX = roadLeft + 6;
+      const maxX = roadRight - 6 - car.w;
+      if (touchTargetX < minX) touchTargetX = minX;
+      if (touchTargetX > maxX) touchTargetX = maxX;
+      // disable legacy side mode
+      touchSide = null;
+    } else {
+      // legacy: set side based on half-screen
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      touchSide = (x < rect.width / 2) ? 'left' : 'right';
+    }
+  });
+
+  // pointermove: when following, update targetX
+  canvas.addEventListener('pointermove', (e) => {
+    if (!TOUCH_FOLLOW_ENABLED) return;
+    if (!touchFollowActive) return;
+    if (e.pointerId !== touchPointerId) return;
+    // update clientX and targetX
+    touchClientX = e.clientX;
+    const rect = canvas.getBoundingClientRect();
+    const localX = touchClientX - rect.left;
+    touchTargetX = localX - car.w/2;
+    // clamp to road immediately to avoid trying to move outside
+    const { roadLeft, laneWidth } = laneInfo();
+    const roadRight = roadLeft + laneWidth * LANE_COUNT;
+    const minX = roadLeft + 6;
+    const maxX = roadRight - 6 - car.w;
+    if (touchTargetX < minX) touchTargetX = minX;
+    if (touchTargetX > maxX) touchTargetX = maxX;
+  });
+
+  // pointerup / cancel: release follow and legacy flags
+  window.addEventListener('pointerup', (e) => {
+    if (TOUCH_FOLLOW_ENABLED) {
+      if (e.pointerId === touchPointerId) {
+        try { canvas.releasePointerCapture(touchPointerId); } catch(err){}
+        touchFollowActive = false;
+        touchPointerId = null;
+        touchTargetX = null;
+      }
+    } else {
+      touchSide = null;
+    }
+  });
+  window.addEventListener('pointercancel', (e) => {
+    if (TOUCH_FOLLOW_ENABLED) {
+      if (e.pointerId === touchPointerId) {
+        try { canvas.releasePointerCapture(touchPointerId); } catch(err){}
+        touchFollowActive = false;
+        touchPointerId = null;
+        touchTargetX = null;
+      }
+    } else {
+      touchSide = null;
+    }
+  });
+
+  // Mobile on-screen controls (buttons) still work as before
+  leftBtn.addEventListener('pointerdown', () => {
+    if (TOUCH_FOLLOW_ENABLED) {
+      // if touch-follow enabled, pressing the button will still set left key
+      keys.left = true;
+    } else {
+      touchSide = 'left';
+    }
+  });
+  leftBtn.addEventListener('pointerup', () => {
+    keys.left = false;
+    if (!TOUCH_FOLLOW_ENABLED) touchSide = null;
+  });
+  rightBtn.addEventListener('pointerdown', () => {
+    if (TOUCH_FOLLOW_ENABLED) {
+      keys.right = true;
+    } else {
+      touchSide = 'right';
+    }
+  });
+  rightBtn.addEventListener('pointerup', () => {
+    keys.right = false;
+    if (!TOUCH_FOLLOW_ENABLED) touchSide = null;
+  });
+  leftBtn.addEventListener('pointerleave', () => { keys.left = false; if (!TOUCH_FOLLOW_ENABLED) touchSide = null; });
+  rightBtn.addEventListener('pointerleave', () => { keys.right = false; if (!TOUCH_FOLLOW_ENABLED) touchSide = null; });
+
+  // attach UI handlers:
   if (startBtn) {
     startBtn.addEventListener('click', async () => {
-      // Attempt fullscreen / hide browser UI on iOS before loading audio (user gesture)
-      await tryEnterFullScreen();
-      // Also update CSS vh var: sometimes entering fullscreen changes innerHeight
-      updateVhVar();
+      // try fullscreen handled elsewhere (index.html version already calls tryEnterFullScreen)
       await loadAssets();
       await startGame();
     });
   }
   if (restartBtn) {
-    restartBtn.addEventListener('click', async () => {
-      await tryEnterFullScreen();
-      updateVhVar();
-      startGame();
-    });
+    restartBtn.addEventListener('click', () => startGame());
   }
 
   // initial UI
@@ -572,5 +681,7 @@
   startScreen.style.display = '';
   gameOverScreen.style.display = 'none';
   scoreEl.textContent = 'Điểm: 0';
+
+  // run resize once to ensure sizes ok
   resize();
 })();

@@ -1,7 +1,7 @@
 // game.js - Car dodger with touch-follow control (drag to move)
-// Change: car is moved up by CAR_VERTICAL_OFFSET (60px) in reset()
-// Replace your existing game.js with this file (this is the previous dynamic version
-// with touch-follow support added and the vertical offset change).
+// Change: CAR_VERTICAL_OFFSET increased by +50px (total 110px)
+// Replace your existing game.js with this file.
+
 (() => {
   const canvas = document.getElementById('gameCanvas');
   const ctx = canvas.getContext('2d');
@@ -19,9 +19,9 @@
   // ---------- CONFIG ----------
   const TOUCH_FOLLOW_ENABLED = true; // true = follow finger x-position; false = older left/right touch
   // Vertical offset to move the car upward (px)
-  const CAR_VERTICAL_OFFSET = 60; // <-- moved car up by 60px
+  const CAR_VERTICAL_OFFSET = 110; // <-- moved car up by total 110px (previously 60, +50 requested)
 
-  // other tuning constants kept from previous version
+  // other tuning constants
   const LANE_COUNT = 3;
   const LANE_OBS_WIDTH_RATIO = 0.52;
   const LANE_SIDE_PADDING = 10;
@@ -430,7 +430,7 @@
       lastExhaustAt = ts;
     }
 
-  // skid particles
+    // skid particles
     if (Math.abs(car.vx) > SKID_THRESHOLD) {
       const skX = car.x + (car.vx > 0 ? 6 : car.w - 6);
       const skY = car.y + car.h - 6;
